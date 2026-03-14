@@ -3,7 +3,7 @@ services:
     name: erp-backend
     env: node
     rootDir: backend
-    buildCommand: npm install
+    buildCommand: rm -rf node_modules && npm install && npm rebuild better-sqlite3
     startCommand: npm start
     disk:
       name: erp-data
