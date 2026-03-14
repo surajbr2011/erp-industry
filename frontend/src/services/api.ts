@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'https://erp-industry-8h6m.onrender.com/api';
+const API_URL = 'https://erp-industry-8h6m.onrender.com/api'; // Hardcoded for production
 
 const api = axios.create({
     baseURL: API_URL,
