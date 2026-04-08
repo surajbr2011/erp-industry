@@ -56,7 +56,7 @@ router.post('/', auth, authorize('admin', 'production_manager', 'quality_inspect
     }
 });
 
-// GET /api/finished-goods/dispatches
+// GET /api/finished-goods/dispatches/all — BUG-010 FIX: added pagination
 router.get('/dispatches/all', auth, async (req, res) => {
     try {
         const { page = 1, limit = 20, status } = req.query;
@@ -64,6 +64,10 @@ router.get('/dispatches/all', auth, async (req, res) => {
         let whereClause = 'WHERE 1=1';
         const params = [];
         if (status) { params.push(status); whereClause += ` AND dl.status = $${params.length}`; }
+
+        const countResult = await db.query(
+            `SELECT COUNT(*) FROM dispatch_logs dl ${whereClause}`, params
+        );
 
         params.push(limit, offset);
         const result = await db.query(
@@ -73,7 +77,11 @@ router.get('/dispatches/all', auth, async (req, res) => {
        ${whereClause} ORDER BY dl.dispatch_date DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
             params
         );
-        res.json({ success: true, data: result.rows });
+        res.json({
+            success: true,
+            data: result.rows,
+            pagination: { total: parseInt(countResult.rows[0].count), page: parseInt(page), limit: parseInt(limit) }
+        });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Server error.' });
     }

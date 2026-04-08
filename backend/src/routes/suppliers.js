@@ -44,6 +44,31 @@ router.get('/', auth, async (req, res) => {
     }
 });
 
+// GET /api/suppliers/export/template — BUG-005 FIX: before /:id to prevent shadowing
+router.get('/export/template', auth, (req, res) => {
+    const template = [
+        { Code: 'SUP-001', Name: 'Example Supplier', 'Contact Person': 'John Doe', Email: 'john@example.com', Phone: '1234567890', 'GST Number': '27AAAAA0000A1Z5' }
+    ];
+    const buffer = exportToExcel(template);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=suppliers_template.xlsx');
+    res.send(buffer);
+});
+
+// GET /api/suppliers/export/all — BUG-005 FIX: before /:id
+router.get('/export/all', auth, async (req, res) => {
+    try {
+        const result = await db.query('SELECT * FROM suppliers ORDER BY name ASC');
+        const buffer = exportToExcel(result.rows);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', 'attachment; filename=suppliers.xlsx');
+        res.send(buffer);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, message: 'Export failed.' });
+    }
+});
+
 // GET /api/suppliers/:id
 router.get('/:id', auth, async (req, res) => {
     try {
@@ -119,68 +144,40 @@ router.delete('/:id', auth, authorize('admin'), async (req, res) => {
     }
 });
 
-// GET /api/suppliers/export/template
-router.get('/export/template', auth, (req, res) => {
-    const template = [
-        { Code: 'SUP-001', Name: 'Example Supplier', 'Contact Person': 'John Doe', Email: 'john@example.com', Phone: '1234567890', 'GST Number': '27AAAAA0000A1Z5' }
-    ];
-    const buffer = exportToExcel(template);
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename=suppliers_template.xlsx');
-    res.send(buffer);
-});
+// GET /api/suppliers/export/template — original location removed (moved above /:id)
+// GET /api/suppliers/export/all — original location removed (moved above /:id)
 
-// GET /api/suppliers/export/all
-router.get('/export/all', auth, async (req, res) => {
-    try {
-        const result = await db.query('SELECT * FROM suppliers ORDER BY name ASC');
-        const buffer = exportToExcel(result.rows);
-
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', 'attachment; filename=suppliers.xlsx');
-        res.send(buffer);
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ success: false, message: 'Export failed.' });
-    }
-});
-
-// POST /api/suppliers/bulk-upload
+// POST /api/suppliers/bulk-upload — BUG-005 + BUG-015 FIX
 router.post('/bulk-upload', auth, authorize('admin', 'purchase_manager'), upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded.' });
-
     try {
         const data = parseExcel(req.file.buffer);
         let imported = 0;
-        let errors = 0;
-
-        for (const row of data) {
+        const errorDetails = [];
+        for (const [idx, row] of data.entries()) {
             try {
                 const code = row.Code || row.code || row['Supplier Code'];
                 const name = row.Name || row.name || row['Supplier Name'];
-                if (!code || !name) continue;
-
+                if (!code || !name) { errorDetails.push({ row: idx + 2, reason: 'Missing Code or Name' }); continue; }
                 const contact_person = row['Contact Person'] || row.contact_person || '';
-                const email = row.Email || row.email || '';
-                const phone = row.Phone || row.phone || '';
-                const gst_number = row['GST Number'] || row.gst_number || '';
-
+                const email          = row.Email            || row.email            || '';
+                const phone          = row.Phone            || row.phone            || '';
+                const gst_number     = row['GST Number']    || row.gst_number      || '';
                 await db.query(
                     `INSERT INTO suppliers (code, name, contact_person, email, phone, gst_number)
-                     VALUES ($1, $2, $3, $4, $5, $6)
+                     VALUES ($1,$2,$3,$4,$5,$6)
                      ON CONFLICT (code) DO UPDATE SET
-                     name = EXCLUDED.name, contact_person = EXCLUDED.contact_person, 
-                     email = EXCLUDED.email, phone = EXCLUDED.phone, gst_number = EXCLUDED.gst_number`,
+                     name=EXCLUDED.name, contact_person=EXCLUDED.contact_person,
+                     email=EXCLUDED.email, phone=EXCLUDED.phone, gst_number=EXCLUDED.gst_number`,
                     [code, name, contact_person, email, phone, gst_number]
                 );
                 imported++;
             } catch (err) {
                 console.error('Row error:', err);
-                errors++;
+                errorDetails.push({ row: idx + 2, code: row.Code || row.code, reason: err.message });
             }
         }
-
-        res.json({ success: true, message: `Imported ${imported} suppliers. Errors: ${errors}` });
+        res.json({ success: true, message: `Imported ${imported} suppliers. Errors: ${errorDetails.length}`, errorDetails });
     } catch (error) {
         console.error(error);
         res.status(500).json({ success: false, message: 'Upload failed.' });

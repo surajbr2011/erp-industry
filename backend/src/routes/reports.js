@@ -4,6 +4,14 @@ const { auth } = require('../middleware/auth');
 
 const router = express.Router();
 
+// BUG-011 FIX: Validate date string format before passing to PostgreSQL
+const isValidDate = (str) => str && !isNaN(Date.parse(str));
+const validateDates = (from_date, to_date) => {
+    if (from_date && !isValidDate(from_date)) return 'Invalid from_date. Use YYYY-MM-DD format.';
+    if (to_date   && !isValidDate(to_date))   return 'Invalid to_date. Use YYYY-MM-DD format.';
+    return null;
+};
+
 // GET /api/reports/dashboard - Summary statistics
 router.get('/dashboard', auth, async (req, res) => {
     try {
@@ -87,6 +95,8 @@ router.get('/dashboard', auth, async (req, res) => {
 router.get('/production', auth, async (req, res) => {
     try {
         const { from_date, to_date } = req.query;
+        const dateErr = validateDates(from_date, to_date);
+        if (dateErr) return res.status(400).json({ success: false, message: dateErr });
         const fromDate = from_date || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
         const toDate = to_date || new Date().toISOString().split('T')[0];
 
@@ -141,6 +151,8 @@ router.get('/production', auth, async (req, res) => {
 router.get('/quality', auth, async (req, res) => {
     try {
         const { from_date, to_date } = req.query;
+        const dateErr = validateDates(from_date, to_date);
+        if (dateErr) return res.status(400).json({ success: false, message: dateErr });
         const fromDate = from_date || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
         const toDate = to_date || new Date().toISOString().split('T')[0];
 
@@ -232,6 +244,8 @@ router.get('/inventory', auth, async (req, res) => {
 router.get('/purchase', auth, async (req, res) => {
     try {
         const { from_date, to_date } = req.query;
+        const dateErr = validateDates(from_date, to_date);
+        if (dateErr) return res.status(400).json({ success: false, message: dateErr });
         const fromDate = from_date || new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
         const toDate = to_date || new Date().toISOString().split('T')[0];
 

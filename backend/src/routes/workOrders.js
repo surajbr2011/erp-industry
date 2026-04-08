@@ -1,11 +1,23 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
+const { randomBytes } = require('crypto');
 const db = require('../config/database');
 const { auth, authorize } = require('../middleware/auth');
 
 const router = express.Router();
 
-const generateWONumber = () => `WO-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
+// BUG-009 FIX: Use crypto for collision-safe number generation
+const generateWONumber = () => `WO-${new Date().getFullYear()}-${randomBytes(3).toString('hex').toUpperCase()}`;
+
+// BUG-012 FIX: Enforce valid WO status transitions
+const WO_STATUS_TRANSITIONS = {
+    draft:      ['pending', 'cancelled'],
+    pending:    ['in_process', 'on_hold', 'cancelled'],
+    in_process: ['completed', 'on_hold', 'cancelled'],
+    on_hold:    ['in_process', 'cancelled'],
+    completed:  [],
+    cancelled:  []
+};
 
 // GET /api/work-orders
 router.get('/', auth, async (req, res) => {
@@ -90,13 +102,13 @@ router.post('/', auth, authorize('admin', 'production_manager'), async (req, res
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
-        const { bom_id, product_name, product_code, planned_quantity, planned_start, planned_end, priority, customer_order, notes, materials, operations } = req.body;
+        const { bom_id, product_name, product_code, planned_quantity, planned_start, planned_end, priority, customer_order, notes, materials, operations, production_manager } = req.body;
         const woNumber = generateWONumber();
 
         const result = await client.query(
             `INSERT INTO work_orders (wo_number, bom_id, product_name, product_code, planned_quantity, planned_start, planned_end, priority, customer_order, notes, created_by, production_manager)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11) RETURNING *`,
-            [woNumber, bom_id, product_name, product_code, planned_quantity, planned_start, planned_end, priority || 'normal', customer_order, notes, req.user.id]
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+            [woNumber, bom_id, product_name, product_code, planned_quantity, planned_start, planned_end, priority || 'normal', customer_order, notes, req.user.id, production_manager || req.user.id]
         );
         const woId = result.rows[0].id;
 
@@ -131,20 +143,32 @@ router.post('/', auth, authorize('admin', 'production_manager'), async (req, res
     }
 });
 
-// PUT /api/work-orders/:id/status
+// PUT /api/work-orders/:id/status — BUG-012 FIX: enforce valid transitions
 router.put('/:id/status', auth, authorize('admin', 'production_manager', 'machine_operator'), async (req, res) => {
     try {
         const { status } = req.body;
-        let updateData = "status=$1, updated_at=NOW()";
-        const params = [status];
 
-        if (status === 'in_process') { updateData += ", actual_start=NOW()"; }
-        if (status === 'completed') { updateData += ", actual_end=NOW()"; }
+        // Fetch current status
+        const current = await db.query('SELECT status FROM work_orders WHERE id=$1', [req.params.id]);
+        if (!current.rows.length) return res.status(404).json({ success: false, message: 'Work order not found.' });
+
+        const currentStatus = current.rows[0].status;
+        const allowed = WO_STATUS_TRANSITIONS[currentStatus] || [];
+        if (!allowed.includes(status)) {
+            return res.status(400).json({
+                success: false,
+                message: `Invalid status transition from '${currentStatus}' to '${status}'. Allowed: [${allowed.join(', ') || 'none'}]`
+            });
+        }
+
+        let updateData = 'status=$1, updated_at=NOW()';
+        const params = [status];
+        if (status === 'in_process') { updateData += ', actual_start=NOW()'; }
+        if (status === 'completed') { updateData += ', actual_end=NOW()'; }
 
         params.push(req.params.id);
         const result = await db.query(`UPDATE work_orders SET ${updateData} WHERE id=$${params.length} RETURNING *`, params);
 
-        if (!result.rows.length) return res.status(404).json({ success: false, message: 'Work order not found.' });
         res.json({ success: true, data: result.rows[0] });
     } catch (error) {
         console.error(error);
@@ -152,7 +176,7 @@ router.put('/:id/status', auth, authorize('admin', 'production_manager', 'machin
     }
 });
 
-// PUT /api/work-orders/operations/:id
+// PUT /api/work-orders/operations/:id — BUG-002 FIX: 404 check before side-effects; guard null machine_id
 router.put('/operations/:id', auth, async (req, res) => {
     try {
         const { machine_id, operator_id, actual_start, actual_end, output_quantity, rejected_quantity, status, notes } = req.body;
@@ -163,29 +187,32 @@ router.put('/operations/:id', auth, async (req, res) => {
         }
 
         const result = await db.query(
-            `UPDATE work_order_operations SET machine_id=$1, operator_id=$2, actual_start=$3, actual_end=$4, 
+            `UPDATE work_order_operations SET machine_id=$1, operator_id=$2, actual_start=$3, actual_end=$4,
        output_quantity=$5, rejected_quantity=$6, status=$7, notes=$8, actual_hours=$9, updated_at=NOW()
        WHERE id=$10 RETURNING *`,
             [machine_id, operator_id, actual_start, actual_end, output_quantity, rejected_quantity || 0, status, notes, actual_hours, req.params.id]
         );
 
-        if (actual_start && status === 'in_progress') {
-            await db.query("UPDATE machines SET status='in_use', updated_at=NOW() WHERE id=$1", [machine_id]);
-        }
-        if (status === 'completed' && actual_end) {
-            await db.query("UPDATE machines SET status='available', updated_at=NOW() WHERE id=$1", [machine_id]);
+        // BUG-002 FIX: check existence BEFORE touching other tables
+        if (!result.rows.length) return res.status(404).json({ success: false, message: 'Operation not found.' });
 
-            // Log machine usage
-            if (actual_start) {
-                await db.query(
-                    `INSERT INTO machine_logs (machine_id, wo_operation_id, operator_id, start_time, end_time, run_time_hours, output_quantity)
+        // Only update machine status if machine_id is provided
+        if (machine_id) {
+            if (actual_start && status === 'in_progress') {
+                await db.query("UPDATE machines SET status='in_use', updated_at=NOW() WHERE id=$1", [machine_id]);
+            }
+            if (status === 'completed' && actual_end) {
+                await db.query("UPDATE machines SET status='available', updated_at=NOW() WHERE id=$1", [machine_id]);
+                if (actual_start) {
+                    await db.query(
+                        `INSERT INTO machine_logs (machine_id, wo_operation_id, operator_id, start_time, end_time, run_time_hours, output_quantity)
            VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-                    [machine_id, req.params.id, operator_id, actual_start, actual_end, actual_hours, output_quantity]
-                );
+                        [machine_id, req.params.id, operator_id, actual_start, actual_end, actual_hours, output_quantity]
+                    );
+                }
             }
         }
 
-        if (!result.rows.length) return res.status(404).json({ success: false, message: 'Operation not found.' });
         res.json({ success: true, data: result.rows[0] });
     } catch (error) {
         console.error(error);

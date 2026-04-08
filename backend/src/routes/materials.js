@@ -39,6 +39,53 @@ router.get('/', auth, async (req, res) => {
     }
 });
 
+// GET /api/materials/batches/all — BUG-003 FIX: before /:id to prevent shadowing
+router.get('/batches/all', auth, async (req, res) => {
+    try {
+        const { material_id, qc_status } = req.query;
+        let whereClause = 'WHERE 1=1';
+        const params = [];
+        if (material_id) { params.push(material_id); whereClause += ` AND mb.material_id = $${params.length}`; }
+        if (qc_status)   { params.push(qc_status);   whereClause += ` AND mb.qc_status = $${params.length}`; }
+        const result = await db.query(
+            `SELECT mb.*, m.name as material_name, m.code as material_code, m.unit, s.name as supplier_name
+       FROM material_batches mb
+       JOIN materials m ON mb.material_id = m.id
+       LEFT JOIN suppliers s ON mb.supplier_id = s.id
+       ${whereClause} ORDER BY mb.received_date DESC LIMIT 100`,
+            params
+        );
+        res.json({ success: true, data: result.rows });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Server error.' });
+    }
+});
+
+// GET /api/materials/export/template — BUG-003 FIX: before /:id
+router.get('/export/template', auth, (req, res) => {
+    const template = [
+        { Code: 'MAT-001', Name: 'Example Material', Description: 'Description here', Category: 'Steel', Unit: 'kg', Cost: 100 }
+    ];
+    const buffer = exportToExcel(template);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=materials_template.xlsx');
+    res.send(buffer);
+});
+
+// GET /api/materials/export/all — BUG-003 FIX: before /:id
+router.get('/export/all', auth, async (req, res) => {
+    try {
+        const result = await db.query('SELECT * FROM materials ORDER BY name ASC');
+        const buffer = exportToExcel(result.rows);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', 'attachment; filename=materials.xlsx');
+        res.send(buffer);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, message: 'Export failed.' });
+    }
+});
+
 // GET /api/materials/:id
 router.get('/:id', auth, async (req, res) => {
     try {
@@ -157,68 +204,39 @@ router.get('/batches/all', auth, async (req, res) => {
     }
 });
 
-// GET /api/materials/export/template
-router.get('/export/template', auth, (req, res) => {
-    const template = [
-        { Code: 'MAT-001', Name: 'Example Material', Description: 'Description here', Category: 'Steel', Unit: 'kg', Cost: 100 }
-    ];
-    const buffer = exportToExcel(template);
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename=materials_template.xlsx');
-    res.send(buffer);
-});
+// GET /api/materials/export/template — original location removed (moved above /:id)
+// GET /api/materials/export/all — original location removed (moved above /:id)
 
-// GET /api/materials/export
-router.get('/export/all', auth, async (req, res) => {
-    try {
-        const result = await db.query('SELECT * FROM materials ORDER BY name ASC');
-        const buffer = exportToExcel(result.rows);
-
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', 'attachment; filename=materials.xlsx');
-        res.send(buffer);
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ success: false, message: 'Export failed.' });
-    }
-});
-
-// POST /api/materials/bulk-upload
+// POST /api/materials/bulk-upload — BUG-015 FIX: per-row error details returned
 router.post('/bulk-upload', auth, authorize('admin', 'purchase_manager'), upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded.' });
-
     try {
         const data = parseExcel(req.file.buffer);
         let imported = 0;
-        let errors = 0;
-
-        for (const row of data) {
+        const errorDetails = [];
+        for (const [idx, row] of data.entries()) {
             try {
-                // Map common excel headers to db fields
                 const code = row.Code || row.code || row['Material Code'] || row['Item Code'];
                 const name = row.Name || row.name || row['Material Name'] || row['Item Name'];
-                if (!code || !name) continue;
-
+                if (!code || !name) { errorDetails.push({ row: idx + 2, reason: 'Missing Code or Name' }); continue; }
                 const description = row.Description || row.description || '';
-                const category = row.Category || row.category || 'General';
-                const unit = row.Unit || row.unit || 'pcs';
-                const unit_cost = parseFloat(row.Cost || row.cost || row['Unit Cost'] || 0);
-
+                const category    = row.Category    || row.category    || 'General';
+                const unit        = row.Unit        || row.unit        || 'pcs';
+                const unit_cost   = parseFloat(row.Cost || row.cost || row['Unit Cost'] || 0);
                 await db.query(
                     `INSERT INTO materials (code, name, description, category, unit, unit_cost)
-                     VALUES ($1, $2, $3, $4, $5, $6)
+                     VALUES ($1,$2,$3,$4,$5,$6)
                      ON CONFLICT (code) DO UPDATE SET
-                     name = EXCLUDED.name, description = EXCLUDED.description, category = EXCLUDED.category, unit = EXCLUDED.unit, unit_cost = EXCLUDED.unit_cost`,
+                     name=EXCLUDED.name, description=EXCLUDED.description, category=EXCLUDED.category, unit=EXCLUDED.unit, unit_cost=EXCLUDED.unit_cost`,
                     [code, name, description, category, unit, unit_cost]
                 );
                 imported++;
             } catch (err) {
                 console.error('Row error:', err);
-                errors++;
+                errorDetails.push({ row: idx + 2, code: row.Code || row.code, reason: err.message });
             }
         }
-
-        res.json({ success: true, message: `Imported ${imported} materials. Errors: ${errors}` });
+        res.json({ success: true, message: `Imported ${imported} materials. Errors: ${errorDetails.length}`, errorDetails });
     } catch (error) {
         console.error(error);
         res.status(500).json({ success: false, message: 'Upload failed.' });

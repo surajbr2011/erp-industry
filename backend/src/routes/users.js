@@ -81,15 +81,15 @@ router.post('/', auth, authorize('admin'), [
     }
 });
 
-// PUT /api/users/:id
+// PUT /api/users/:id — BUG-013 FIX: email now updatable
 router.put('/:id', auth, authorize('admin'), async (req, res) => {
     try {
-        const { name, role, department, phone, is_active } = req.body;
+        const { name, email, role, department, phone, is_active } = req.body;
 
         const result = await db.query(
-            `UPDATE users SET name=$1, role=$2, department=$3, phone=$4, is_active=$5, updated_at=NOW()
-       WHERE id=$6 RETURNING id, name, email, role, department, phone, is_active`,
-            [name, role, department, phone, is_active, req.params.id]
+            `UPDATE users SET name=$1, email=$2, role=$3, department=$4, phone=$5, is_active=$6, updated_at=NOW()
+       WHERE id=$7 RETURNING id, name, email, role, department, phone, is_active`,
+            [name, email, role, department, phone, is_active, req.params.id]
         );
 
         if (!result.rows.length) {
@@ -98,6 +98,9 @@ router.put('/:id', auth, authorize('admin'), async (req, res) => {
 
         res.json({ success: true, data: result.rows[0] });
     } catch (error) {
+        if (error.code === '23505') {
+            return res.status(409).json({ success: false, message: 'Email already in use by another account.' });
+        }
         console.error('Update user error:', error);
         res.status(500).json({ success: false, message: 'Server error.' });
     }

@@ -41,6 +41,31 @@ router.get('/', auth, async (req, res) => {
     }
 });
 
+// GET /api/machines/logs/all — BUG-004 FIX: must be before /:id to prevent route shadowing
+router.get('/logs/all', auth, async (req, res) => {
+    try {
+        const { machine_id, from_date, to_date } = req.query;
+        let whereClause = 'WHERE 1=1';
+        const params = [];
+
+        if (machine_id) { params.push(machine_id); whereClause += ` AND ml.machine_id = $${params.length}`; }
+        if (from_date) { params.push(from_date); whereClause += ` AND ml.start_time >= $${params.length}`; }
+        if (to_date) { params.push(to_date); whereClause += ` AND ml.start_time <= $${params.length}`; }
+
+        const result = await db.query(
+            `SELECT ml.*, m.name as machine_name, m.machine_code, u.name as operator_name
+       FROM machine_logs ml
+       JOIN machines m ON ml.machine_id = m.id
+       LEFT JOIN users u ON ml.operator_id = u.id
+       ${whereClause} ORDER BY ml.start_time DESC LIMIT 100`,
+            params
+        );
+        res.json({ success: true, data: result.rows });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Server error.' });
+    }
+});
+
 // GET /api/machines/:id
 router.get('/:id', auth, async (req, res) => {
     try {
@@ -105,31 +130,6 @@ router.put('/:id', auth, authorize('admin', 'production_manager'), async (req, r
         res.json({ success: true, data: result.rows[0] });
     } catch (error) {
         console.error(error);
-        res.status(500).json({ success: false, message: 'Server error.' });
-    }
-});
-
-// GET /api/machines/logs/all
-router.get('/logs/all', auth, async (req, res) => {
-    try {
-        const { machine_id, from_date, to_date } = req.query;
-        let whereClause = 'WHERE 1=1';
-        const params = [];
-
-        if (machine_id) { params.push(machine_id); whereClause += ` AND ml.machine_id = $${params.length}`; }
-        if (from_date) { params.push(from_date); whereClause += ` AND ml.start_time >= $${params.length}`; }
-        if (to_date) { params.push(to_date); whereClause += ` AND ml.start_time <= $${params.length}`; }
-
-        const result = await db.query(
-            `SELECT ml.*, m.name as machine_name, m.machine_code, u.name as operator_name
-       FROM machine_logs ml
-       JOIN machines m ON ml.machine_id = m.id
-       LEFT JOIN users u ON ml.operator_id = u.id
-       ${whereClause} ORDER BY ml.start_time DESC LIMIT 100`,
-            params
-        );
-        res.json({ success: true, data: result.rows });
-    } catch (error) {
         res.status(500).json({ success: false, message: 'Server error.' });
     }
 });

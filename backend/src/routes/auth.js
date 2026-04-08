@@ -2,13 +2,23 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
+const rateLimit = require('express-rate-limit');
 const db = require('../config/database');
 const { auth } = require('../middleware/auth');
 
 const router = express.Router();
 
+// BUG-008 FIX: Strict rate limiter for login — 10 attempts per 15 min per IP
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: 'Too many login attempts. Please try again after 15 minutes.' }
+});
+
 // POST /api/auth/login
-router.post('/login', [
+router.post('/login', loginLimiter, [
     body('email').isEmail().normalizeEmail(),
     body('password').notEmpty()
 ], async (req, res) => {

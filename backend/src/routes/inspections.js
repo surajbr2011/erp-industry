@@ -37,6 +37,20 @@ router.get('/', auth, async (req, res) => {
     }
 });
 
+// GET /api/inspections/plans/all — ROUTE FIX: must be before /:id to avoid shadowing
+router.get('/plans/all', auth, async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT ip.*, b.product_name, b.bom_number,
+       (SELECT COUNT(*) FROM inspection_plan_items WHERE plan_id = ip.id) as item_count
+       FROM inspection_plans ip LEFT JOIN boms b ON ip.bom_id = b.id ORDER BY ip.created_at DESC`
+        );
+        res.json({ success: true, data: result.rows });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Server error.' });
+    }
+});
+
 // GET /api/inspections/:id
 router.get('/:id', auth, async (req, res) => {
     try {
@@ -82,14 +96,17 @@ router.post('/', auth, authorize('admin', 'quality_inspector', 'production_manag
         if (failCount > 0) overallStatus = 'failed';
         else if (reworkCount > 0) overallStatus = 'rework_required';
 
+        // BUG-006 FIX: Safe division — avoid NaN when results is empty/undefined
+        const totalResults = results?.length || 0;
+        const qty_passed = totalResults > 0 ? Math.round(quantity_inspected * passCount / totalResults) : 0;
+        const qty_failed  = totalResults > 0 ? Math.round(quantity_inspected * failCount  / totalResults) : 0;
+        const qty_rework  = totalResults > 0 ? Math.round(quantity_inspected * reworkCount / totalResults) : 0;
+
         const result = await client.query(
             `INSERT INTO inspections (inspection_number, plan_id, wo_id, wo_operation_id, part_id, inspector_id, inspection_type, quantity_inspected, quantity_passed, quantity_failed, quantity_rework, overall_status, remarks)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
             [inspectionNumber, plan_id, wo_id, wo_operation_id, part_id, req.user.id, inspection_type, quantity_inspected,
-                Math.round(quantity_inspected * passCount / (results?.length || 1)),
-                Math.round(quantity_inspected * failCount / (results?.length || 1)),
-                Math.round(quantity_inspected * reworkCount / (results?.length || 1)),
-                overallStatus, remarks]
+                qty_passed, qty_failed, qty_rework, overallStatus, remarks]
         );
         const inspectionId = result.rows[0].id;
 
@@ -128,19 +145,7 @@ router.post('/', auth, authorize('admin', 'quality_inspector', 'production_manag
     }
 });
 
-// GET /api/inspections/plans/all
-router.get('/plans/all', auth, async (req, res) => {
-    try {
-        const result = await db.query(
-            `SELECT ip.*, b.product_name, b.bom_number,
-       (SELECT COUNT(*) FROM inspection_plan_items WHERE plan_id = ip.id) as item_count
-       FROM inspection_plans ip LEFT JOIN boms b ON ip.bom_id = b.id ORDER BY ip.created_at DESC`
-        );
-        res.json({ success: true, data: result.rows });
-    } catch (error) {
-        res.status(500).json({ success: false, message: 'Server error.' });
-    }
-});
+// GET /api/inspections/plans/all — original location removed (moved above /:id to fix routing)
 
 // POST /api/inspections/plans
 router.post('/plans', auth, authorize('admin', 'quality_inspector'), async (req, res) => {
