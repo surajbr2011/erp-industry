@@ -503,16 +503,32 @@ function setup() {
     CREATE INDEX IF NOT EXISTS idx_inspections_part ON inspections(part_id);
   `);
 
-    console.log('âœ… Tables created!');
+    console.log('✅ Tables created!');
 
-    // Seed data (only if users table is empty)
+    // Seed data: skip if already seeded, UNLESS RESEED_DEMO=true env var is set
     const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get();
-    if (userCount.count > 0) {
-        console.log('âœ… Database already seeded, skipping...');
+    const forceReseed = process.env.RESEED_DEMO === 'true';
+
+    if (userCount.count > 0 && !forceReseed) {
+        console.log('✅ Database already seeded, skipping...');
         return;
     }
 
-    console.log('ðŸŒ± Seeding demo data for all modules...');
+    if (forceReseed && userCount.count > 0) {
+        console.log('🔄 RESEED_DEMO=true detected — wiping existing data...');
+        const wipe = ['audit_logs','dispatch_logs','finished_goods','inspection_results',
+            'inspections','inspection_plan_items','inspection_plans','part_history','parts',
+            'work_order_operations','work_orders','bom_items','bom_operations','boms',
+            'quotation_items','quotations','rfq_items','rfq_suppliers','rfqs',
+            'purchase_order_items','material_batches','inventory_transactions','purchase_orders',
+            'machine_logs','machines','materials','suppliers','users'];
+        for (const t of wipe) {
+            try { db.prepare(`DELETE FROM ${t}`).run(); } catch(e) {}
+        }
+        console.log('✅ Data wiped — re-seeding now...');
+    }
+
+    console.log('🌱 Seeding demo data for all modules...');
 
     const pw = bcrypt.hashSync('Password@123', 10);
     const G  = (sql, p=[]) => db.prepare(sql).get(...p);
