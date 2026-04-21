@@ -104,7 +104,7 @@ router.post('/', auth, authorize('admin', 'production_manager'), async (req, res
         res.status(201).json({ success: true, data: result.rows[0] });
     } catch (error) {
         await client.query('ROLLBACK');
-        if (error.code === '23505') return res.status(409).json({ success: false, message: 'Product code already exists.' });
+        if (error.code === '23505' || error.code === 'SQLITE_CONSTRAINT_UNIQUE' || (error.message && error.message.includes('UNIQUE constraint failed'))) return res.status(409).json({ success: false, message: 'Product code already exists.' });
         console.error(error);
         res.status(500).json({ success: false, message: 'Server error.' });
     } finally {

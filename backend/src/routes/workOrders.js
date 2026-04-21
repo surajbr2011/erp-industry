@@ -67,15 +67,6 @@ router.get('/:id', auth, async (req, res) => {
         );
         if (!wo.rows.length) return res.status(404).json({ success: false, message: 'Work order not found.' });
 
-        const materials = await db.query(
-            `SELECT wom.*, m.name as material_name, m.code as material_code, m.unit, mb.batch_number
-       FROM work_order_materials wom
-       JOIN materials m ON wom.material_id = m.id
-       LEFT JOIN material_batches mb ON wom.batch_id = mb.id
-       WHERE wom.wo_id = $1`,
-            [req.params.id]
-        );
-
         const operations = await db.query(
             `SELECT woo.*, mc.name as machine_name, mc.machine_code, u.name as operator_name
        FROM work_order_operations woo
@@ -90,7 +81,7 @@ router.get('/:id', auth, async (req, res) => {
             [req.params.id]
         );
 
-        res.json({ success: true, data: { ...wo.rows[0], materials: materials.rows, operations: operations.rows, parts: parts.rows } });
+        res.json({ success: true, data: { ...wo.rows[0], operations: operations.rows, parts: parts.rows } });
     } catch (error) {
         console.error(error);
         res.status(500).json({ success: false, message: 'Server error.' });
@@ -181,6 +172,10 @@ router.put('/operations/:id', auth, async (req, res) => {
     try {
         const { machine_id, operator_id, actual_start, actual_end, output_quantity, rejected_quantity, status, notes } = req.body;
 
+        // BUG-002 FIX: check existence BEFORE any updates
+        const existing = await db.query('SELECT id FROM work_order_operations WHERE id=$1', [req.params.id]);
+        if (!existing.rows.length) return res.status(404).json({ success: false, message: 'Operation not found.' });
+
         let actual_hours = null;
         if (actual_start && actual_end) {
             actual_hours = (new Date(actual_end) - new Date(actual_start)) / 3600000;
@@ -192,9 +187,6 @@ router.put('/operations/:id', auth, async (req, res) => {
        WHERE id=$10 RETURNING *`,
             [machine_id, operator_id, actual_start, actual_end, output_quantity, rejected_quantity || 0, status, notes, actual_hours, req.params.id]
         );
-
-        // BUG-002 FIX: check existence BEFORE touching other tables
-        if (!result.rows.length) return res.status(404).json({ success: false, message: 'Operation not found.' });
 
         // Only update machine status if machine_id is provided
         if (machine_id) {

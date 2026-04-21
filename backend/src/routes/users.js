@@ -73,7 +73,7 @@ router.post('/', auth, authorize('admin'), [
 
         res.status(201).json({ success: true, data: result.rows[0] });
     } catch (error) {
-        if (error.code === '23505') {
+        if (error.code === '23505' || error.code === 'SQLITE_CONSTRAINT_UNIQUE' || (error.message && error.message.includes('UNIQUE constraint failed'))) {
             return res.status(409).json({ success: false, message: 'Email already exists.' });
         }
         console.error('Create user error:', error);
@@ -98,7 +98,7 @@ router.put('/:id', auth, authorize('admin'), async (req, res) => {
 
         res.json({ success: true, data: result.rows[0] });
     } catch (error) {
-        if (error.code === '23505') {
+        if (error.code === '23505' || error.code === 'SQLITE_CONSTRAINT_UNIQUE' || (error.message && error.message.includes('UNIQUE constraint failed'))) {
             return res.status(409).json({ success: false, message: 'Email already in use by another account.' });
         }
         console.error('Update user error:', error);
