@@ -70,24 +70,13 @@ router.get('/trace/:serial', auth, async (req, res) => {
             [part.rows[0].id]
         );
 
-        // Get material batches used for the work order
-        const materials = await db.query(
-            `SELECT wom.*, m.name as material_name, m.code as material_code, mb.batch_number, mb.heat_number, s.name as supplier_name
-       FROM work_order_materials wom
-       JOIN materials m ON wom.material_id = m.id
-       LEFT JOIN material_batches mb ON wom.batch_id = mb.id
-       LEFT JOIN suppliers s ON mb.supplier_id = s.id
-       WHERE wom.wo_id = $1`,
-            [part.rows[0].wo_id]
-        );
-
         res.json({
             success: true,
             data: {
                 part: part.rows[0],
                 history: history.rows,
                 inspections: inspections.rows,
-                materials: materials.rows
+                materials: []
             }
         });
     } catch (error) {
