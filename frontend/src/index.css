@@ -74,15 +74,7 @@ body {
   overflow-x: hidden;
 }
 
-/* Scrollbar Styling (Chromium-based browsers only) */
-@supports selector(::-webkit-scrollbar) {
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: var(--slate-100); }
-  ::-webkit-scrollbar-thumb { background: var(--slate-300); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: var(--slate-400); }
-}
-
-/* Firefox scrollbar */
+/* Scrollbar Styling (standard properties, cross-browser) */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--slate-300) var(--slate-100);
