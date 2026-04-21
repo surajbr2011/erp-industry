@@ -7,8 +7,12 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 
-// Security
-app.use(helmet());
+// Security — configured for cross-origin API usage
+app.use(helmet({
+    contentSecurityPolicy: false, // Disable CSP — this is a pure API server, CSP is for HTML pages
+    crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allow cross-origin fetch from Netlify frontend
+    crossOriginOpenerPolicy: false, // Not needed for API server
+}));
 app.use(cors({
     origin: true, // Allow all origins, or automatically reflect request origin
     credentials: true,
