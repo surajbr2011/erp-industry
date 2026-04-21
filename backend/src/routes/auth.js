@@ -8,10 +8,11 @@ const { auth } = require('../middleware/auth');
 
 const router = express.Router();
 
-// BUG-008 FIX: Strict rate limiter for login — 10 attempts per 15 min per IP
+// BUG-008 FIX: Strict rate limiter for login
+// 50 attempts in development (allows QA automation), 10 in production
 const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 10,
+    max: process.env.NODE_ENV === 'production' ? 10 : 50,
     standardHeaders: true,
     legacyHeaders: false,
     message: { success: false, message: 'Too many login attempts. Please try again after 15 minutes.' }

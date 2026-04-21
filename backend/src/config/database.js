@@ -57,6 +57,38 @@ function convertQuery(text) {
   sql = sql.replace(/DEFAULT\s+true\b/gi, 'DEFAULT 1');
   sql = sql.replace(/DEFAULT\s+false\b/gi, 'DEFAULT 0');
 
+  // -- PostgreSQL cast syntax ::type  →  strip (SQLite ignores explicit casts)
+  sql = sql.replace(/::(numeric|integer|float|real|double precision|text|date|timestamp|bigint)/gi, '');
+
+  // -- INTERVAL '30 days' / INTERVAL '1 day'  →  SQLite datetime modifier
+  // Used in: datetime('now') - INTERVAL 'N days/hours'
+  // Pattern: datetime('now') - INTERVAL 'N unit'  →  datetime('now','-N unit')
+  sql = sql.replace(
+    /(datetime\('now'\))\s*-\s*INTERVAL\s+'(\d+)\s+(day|days|hour|hours|minute|minutes)'/gi,
+    (_, dt, n, unit) => `datetime('now', '-${n} ${unit}')`
+  );
+  // Bare INTERVAL not preceded by datetime() — convert to sqlite offset string
+  sql = sql.replace(/INTERVAL\s+'(\d+)\s+(day|days|hour|hours|minute|minutes)'/gi,
+    (_, n, unit) => `'-${n} ${unit}'`);
+
+  // -- FILTER (WHERE ...) aggregate  →  not supported in SQLite < 3.30
+  // Rewrite: COUNT(*) FILTER (WHERE cond)  →  SUM(CASE WHEN cond THEN 1 ELSE 0 END)
+  sql = sql.replace(
+    /COUNT\(\*\)\s+FILTER\s*\(\s*WHERE\s+(.+?)\s*\)/gi,
+    (_, cond) => `SUM(CASE WHEN ${cond} THEN 1 ELSE 0 END)`
+  );
+
+  // -- EXTRACT(DAY FROM expr)  →  CAST(julianday(end) - julianday(start) AS INTEGER)
+  // Simple form: EXTRACT(DAY FROM col1 - col2)  →  CAST((julianday(col1)-julianday(col2)) AS INTEGER)
+  sql = sql.replace(
+    /EXTRACT\s*\(\s*DAY\s+FROM\s+(.+?)\s*-\s*(.+?)\s*\)/gi,
+    (_, a, b) => `CAST((julianday(${a.trim()}) - julianday(${b.trim()})) AS INTEGER)`
+  );
+
+  // -- ::date + INTERVAL '1 day'  (date boundary inclusive) already handled above
+  // Remove any orphaned :: operator if still present
+  sql = sql.replace(/::/g, ' ');
+
   return sql;
 }
 

@@ -110,29 +110,29 @@ router.get('/production', auth, async (req, res) => {
           SUM(rejected_quantity) as rejected_qty,
           ROUND(100.0 * SUM(produced_quantity) / NULLIF(SUM(planned_quantity), 0), 2) as efficiency
         FROM work_orders
-        WHERE created_at BETWEEN $1 AND $2::date + INTERVAL '1 day'
+        WHERE created_at BETWEEN $1 AND date($2, '+1 day')
         GROUP BY product_name, product_code ORDER BY total_orders DESC`,
                 [fromDate, toDate]),
 
             db.query(`
         SELECT m.name as machine_name, m.machine_code, m.machine_type,
                COUNT(ml.id) as job_count,
-               ROUND(SUM(ml.run_time_hours)::numeric, 2) as total_hours,
-               ROUND(AVG(ml.run_time_hours)::numeric, 2) as avg_hours_per_job,
+               ROUND(SUM(ml.run_time_hours), 2) as total_hours,
+               ROUND(AVG(ml.run_time_hours), 2) as avg_hours_per_job,
                SUM(ml.output_quantity) as total_output
         FROM machines m
         LEFT JOIN machine_logs ml ON m.id = ml.machine_id 
-          AND ml.start_time BETWEEN $1 AND $2::date + INTERVAL '1 day'
+          AND ml.start_time BETWEEN $1 AND date($2, '+1 day')
         GROUP BY m.id, m.name, m.machine_code, m.machine_type
-        ORDER BY total_hours DESC NULLS LAST`,
+        ORDER BY total_hours DESC`,
                 [fromDate, toDate]),
 
             db.query(`
         SELECT operation_type, COUNT(*) as count, 
-               ROUND(AVG(actual_hours)::numeric, 2) as avg_hours,
+               ROUND(AVG(actual_hours), 2) as avg_hours,
                SUM(output_quantity) as total_output,
                SUM(rejected_quantity) as total_rejected
-        FROM work_order_operations WHERE actual_end BETWEEN $1 AND $2::date + INTERVAL '1 day'
+        FROM work_order_operations WHERE updated_at BETWEEN $1 AND date($2, '+1 day')
         GROUP BY operation_type ORDER BY count DESC`,
                 [fromDate, toDate])
         ]);
@@ -166,7 +166,7 @@ router.get('/quality', auth, async (req, res) => {
           SUM(quantity_rework) as total_rework,
           ROUND(100.0 * SUM(quantity_failed) / NULLIF(SUM(quantity_inspected), 0), 2) as rejection_rate,
           ROUND(100.0 * SUM(quantity_passed) / NULLIF(SUM(quantity_inspected), 0), 2) as pass_rate
-        FROM inspections WHERE inspection_date BETWEEN $1 AND $2::date + INTERVAL '1 day'`,
+        FROM inspections WHERE inspection_date BETWEEN $1 AND date($2, '+1 day')`,
                 [fromDate, toDate]),
 
             db.query(`
@@ -177,18 +177,18 @@ router.get('/quality', auth, async (req, res) => {
                SUM(i.quantity_failed) as qty_failed,
                ROUND(100.0 * SUM(i.quantity_failed) / NULLIF(SUM(i.quantity_inspected), 0), 2) as rejection_rate
         FROM inspections i JOIN work_orders wo ON i.wo_id = wo.id
-        WHERE i.inspection_date BETWEEN $1 AND $2::date + INTERVAL '1 day'
-        GROUP BY wo.product_name, wo.product_code ORDER BY rejection_rate DESC NULLS LAST`,
+        WHERE i.inspection_date BETWEEN $1 AND date($2, '+1 day')
+        GROUP BY wo.product_name, wo.product_code ORDER BY rejection_rate DESC`,
                 [fromDate, toDate]),
 
             db.query(`
         SELECT u.name as inspector_name,
                COUNT(i.id) as inspections_done,
                SUM(i.quantity_inspected) as qty_inspected,
-               COUNT(i.id) FILTER (WHERE i.overall_status = 'passed') as passed,
-               COUNT(i.id) FILTER (WHERE i.overall_status = 'failed') as failed
+               SUM(CASE WHEN i.overall_status = 'passed' THEN 1 ELSE 0 END) as passed,
+               SUM(CASE WHEN i.overall_status = 'failed' THEN 1 ELSE 0 END) as failed
         FROM inspections i JOIN users u ON i.inspector_id = u.id
-        WHERE i.inspection_date BETWEEN $1 AND $2::date + INTERVAL '1 day'
+        WHERE i.inspection_date BETWEEN $1 AND date($2, '+1 day')
         GROUP BY u.id, u.name ORDER BY inspections_done DESC`,
                 [fromDate, toDate])
         ]);
@@ -254,21 +254,21 @@ router.get('/purchase', auth, async (req, res) => {
         SELECT 
           COUNT(*) as total_pos,
           SUM(total_amount) as total_spend,
-          COUNT(*) FILTER (WHERE status = 'received') as completed,
-          COUNT(*) FILTER (WHERE status IN ('draft', 'sent', 'approved')) as pending,
-          COUNT(*) FILTER (WHERE actual_delivery > expected_delivery AND actual_delivery IS NOT NULL) as late_deliveries
-        FROM purchase_orders WHERE order_date BETWEEN $1 AND $2::date + INTERVAL '1 day'`,
+          SUM(CASE WHEN status = 'received' THEN 1 ELSE 0 END) as completed,
+          SUM(CASE WHEN status IN ('draft', 'sent', 'approved') THEN 1 ELSE 0 END) as pending,
+          SUM(CASE WHEN actual_delivery > expected_delivery AND actual_delivery IS NOT NULL THEN 1 ELSE 0 END) as late_deliveries
+        FROM purchase_orders WHERE order_date BETWEEN $1 AND date($2, '+1 day')`,
                 [fromDate, toDate]),
 
             db.query(`
         SELECT s.name as supplier_name, s.code as supplier_code,
                COUNT(po.id) as total_orders, SUM(po.total_amount) as total_spend,
-               COUNT(*) FILTER (WHERE po.status = 'received') as completed_orders,
+               SUM(CASE WHEN po.status = 'received' THEN 1 ELSE 0 END) as completed_orders,
                ROUND(AVG(CASE WHEN po.actual_delivery IS NOT NULL 
-                 THEN EXTRACT(DAY FROM po.actual_delivery - po.expected_delivery) ELSE NULL END)::numeric, 1) as avg_delay_days
+                 THEN CAST((julianday(po.actual_delivery) - julianday(po.expected_delivery)) AS INTEGER) ELSE NULL END), 1) as avg_delay_days
         FROM suppliers s LEFT JOIN purchase_orders po ON s.id = po.supplier_id
-          AND po.order_date BETWEEN $1 AND $2::date + INTERVAL '1 day'
-        GROUP BY s.id, s.name, s.code ORDER BY total_spend DESC NULLS LAST LIMIT 10`,
+          AND po.order_date BETWEEN $1 AND date($2, '+1 day')
+        GROUP BY s.id, s.name, s.code ORDER BY total_spend DESC LIMIT 10`,
                 [fromDate, toDate])
         ]);
 

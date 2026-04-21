@@ -37,7 +37,7 @@ function App() {
 
   useEffect(() => {
     loadFromStorage();
-  }, []);
+  }, [loadFromStorage]);
 
   return (
     <BrowserRouter>
