@@ -12,7 +12,8 @@ const generateWONumber = () => `WO-${new Date().getFullYear()}-${randomBytes(3).
 // BUG-012 FIX: Enforce valid WO status transitions
 const WO_STATUS_TRANSITIONS = {
     draft:      ['pending', 'cancelled'],
-    pending:    ['in_process', 'on_hold', 'cancelled'],
+    pending:    ['released', 'in_process', 'on_hold', 'cancelled'],
+    released:   ['in_process', 'on_hold', 'cancelled'],
     in_process: ['completed', 'on_hold', 'cancelled'],
     on_hold:    ['in_process', 'cancelled'],
     completed:  [],
@@ -93,32 +94,62 @@ router.post('/', auth, authorize('admin', 'production_manager'), async (req, res
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
-        const { bom_id, product_name, product_code, planned_quantity, planned_start, planned_end, priority, customer_order, notes, materials, operations, production_manager } = req.body;
+        const {
+            bom_id, product_name, product_code,
+            planned_quantity, quantity,          // frontend sends 'quantity'
+            planned_start, start_date,           // frontend sends 'start_date'
+            planned_end, due_date,               // frontend sends 'due_date'
+            priority, customer_order, notes, operations, production_manager
+        } = req.body;
+
         const woNumber = generateWONumber();
 
-        const result = await client.query(
-            `INSERT INTO work_orders (wo_number, bom_id, product_name, product_code, planned_quantity, planned_start, planned_end, priority, customer_order, notes, created_by, production_manager)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-            [woNumber, bom_id, product_name, product_code, planned_quantity, planned_start, planned_end, priority || 'normal', customer_order, notes, req.user.id, production_manager || req.user.id]
-        );
-        const woId = result.rows[0].id;
+        // Normalize FK: empty string → null
+        const safeBomId = (bom_id === '' || bom_id === undefined || bom_id === null) ? null : bom_id;
 
-        if (materials && materials.length) {
-            for (const mat of materials) {
-                await client.query(
-                    `INSERT INTO work_order_materials (wo_id, material_id, batch_id, required_quantity)
-           VALUES ($1,$2,$3,$4)`,
-                    [woId, mat.material_id, mat.batch_id, mat.required_quantity]
-                );
+        // Derive product info from BOM when not explicitly provided
+        let pName = product_name || '';
+        let pCode = product_code || '';
+        if (safeBomId && (!pName || !pCode)) {
+            const bomRow = await client.query('SELECT product_name, product_code FROM boms WHERE id = $1', [safeBomId]);
+            if (bomRow.rows.length) {
+                pName = pName || bomRow.rows[0].product_name;
+                pCode = pCode || bomRow.rows[0].product_code;
             }
         }
 
+        // Accept both frontend field names and direct column names
+        const qty = planned_quantity || quantity || 1;
+        const pStart = planned_start || start_date || null;
+        const pEnd = planned_end || due_date || null;
+
+        const result = await client.query(
+            `INSERT INTO work_orders (wo_number, bom_id, product_name, product_code, quantity, planned_quantity, planned_start, planned_end, priority, customer_order, notes, created_by, production_manager)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+            [woNumber, safeBomId, pName, pCode, qty, qty, pStart, pEnd, priority || 'normal', customer_order, notes, req.user.id, production_manager || req.user.id]
+        );
+        const woId = result.rows[0].id;
+
+        // Auto-copy operations from BOM if none provided explicitly
         if (operations && operations.length) {
             for (const op of operations) {
                 await client.query(
-                    `INSERT INTO work_order_operations (wo_id, operation_name, operation_type, sequence_number, machine_id, operator_id, planned_hours, planned_quantity)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-                    [woId, op.operation_name, op.operation_type, op.sequence_number, op.machine_id, op.operator_id, op.planned_hours, op.planned_quantity || planned_quantity]
+                    `INSERT INTO work_order_operations (wo_id, operation_name, operation_type, sequence_number, machine_id, operator_id, planned_hours)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+                    [woId, op.operation_name, op.operation_type, op.sequence_number, op.machine_id || null, op.operator_id || null, op.planned_hours]
+                );
+            }
+        } else if (safeBomId) {
+            // Auto-populate operations from BOM definition
+            const bomOps = await client.query(
+                'SELECT operation_name, operation_type, sequence_number, estimated_time_hours FROM bom_operations WHERE bom_id = $1 ORDER BY sequence_number',
+                [safeBomId]
+            );
+            for (const op of bomOps.rows) {
+                await client.query(
+                    `INSERT INTO work_order_operations (wo_id, operation_name, operation_type, sequence_number, planned_hours)
+           VALUES ($1,$2,$3,$4,$5)`,
+                    [woId, op.operation_name, op.operation_type, op.sequence_number, op.estimated_time_hours]
                 );
             }
         }
