@@ -82,6 +82,19 @@ router.post('/', auth, authorize('admin', 'quality_inspector', 'production_manag
         const { plan_id, wo_id, wo_operation_id, part_id, inspection_type, quantity_inspected, remarks, results } = req.body;
         const inspectionNumber = generateInspectionNumber();
 
+        // Normalize FK fields: convert empty strings / undefined / 0 to null to avoid FK constraint errors
+        const safeFk = (val) => (val === '' || val === undefined || val === null || val === 0) ? null : val;
+        const safePlanId = safeFk(plan_id);
+        const safePartId = safeFk(part_id);
+        const safeWoOperationId = safeFk(wo_operation_id);
+
+        // Auto-derive wo_id from the part record if not provided
+        let safeWoId = safeFk(wo_id);
+        if (!safeWoId && safePartId) {
+            const partRow = await client.query('SELECT wo_id FROM parts WHERE id = $1', [safePartId]);
+            if (partRow.rows.length) safeWoId = partRow.rows[0].wo_id || null;
+        }
+
         // Calculate pass/fail counts
         let passCount = 0, failCount = 0, reworkCount = 0;
         if (results) {
@@ -105,7 +118,7 @@ router.post('/', auth, authorize('admin', 'quality_inspector', 'production_manag
         const result = await client.query(
             `INSERT INTO inspections (inspection_number, plan_id, wo_id, wo_operation_id, part_id, inspector_id, inspection_type, quantity_inspected, quantity_passed, quantity_failed, quantity_rework, overall_status, remarks)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-            [inspectionNumber, plan_id, wo_id, wo_operation_id, part_id, req.user.id, inspection_type, quantity_inspected,
+            [inspectionNumber, safePlanId, safeWoId, safeWoOperationId, safePartId, req.user.id, inspection_type, quantity_inspected,
                 qty_passed, qty_failed, qty_rework, overallStatus, remarks]
         );
         const inspectionId = result.rows[0].id;
@@ -122,15 +135,15 @@ router.post('/', auth, authorize('admin', 'quality_inspector', 'production_manag
         }
 
         // Update part status if applicable
-        if (part_id) {
+        if (safePartId) {
             const newPartStatus = overallStatus === 'passed' ? 'passed' :
                 overallStatus === 'failed' ? 'failed' : 'rework';
-            await client.query('UPDATE parts SET status=$1, updated_at=NOW() WHERE id=$2', [newPartStatus, part_id]);
+            await client.query('UPDATE parts SET status=$1, updated_at=NOW() WHERE id=$2', [newPartStatus, safePartId]);
 
             await client.query(
                 `INSERT INTO part_history (part_id, event_type, event_description, operator_id, inspection_id)
          VALUES ($1, 'inspection', $2, $3, $4)`,
-                [part_id, `Inspection ${overallStatus}: ${remarks || ''}`, req.user.id, inspectionId]
+                [safePartId, `Inspection ${overallStatus}: ${remarks || ''}`, req.user.id, inspectionId]
             );
         }
 
