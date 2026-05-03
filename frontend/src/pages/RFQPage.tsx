@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Search, Send } from 'lucide-react';
+import { Plus, Search, Send, Trash2 } from 'lucide-react';
 import { rfqsAPI, suppliersAPI } from '../services/api';
 import Header from '../components/Header';
 import Modal from '../components/Modal';
@@ -17,11 +17,22 @@ export default function RFQPage() {
 
     const [suppliers, setSuppliers] = useState<any[]>([]);
     const [saving, setSaving] = useState(false);
+    const [formErrors, setFormErrors] = useState<Record<string, string>>({});
     const [form, setForm] = useState({
         title: '', description: '', required_by: '', notes: '',
         items: [{ material_name: '', quantity: '', unit: 'kg', specifications: '' }],
         supplier_ids: [] as number[]
     });
+
+    // RFQ_015: RFQ Title — letters, digits, spaces and common punctuation only
+    const RFQ_TITLE_REGEX = /^[A-Za-z0-9\s\-_.,()&/:'"]+$/;
+    // RFQ_016: today's date in YYYY-MM-DD format for min attribute and past-date check
+    const getTodayISO = () => new Date().toISOString().split('T')[0];
+    // RFQ_017: Material Name — letters, digits, spaces and basic material-description punctuation
+    const MATERIAL_NAME_REGEX = /^[A-Za-z0-9\s\-_.,()/%]+$/;
+    // RFQ_021: Description limits
+    const DESC_MAX = 500;
+    const DESC_MIN = 10;
 
     const load = async () => {
         setLoading(true);
@@ -39,12 +50,58 @@ export default function RFQPage() {
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+
+        // RFQ_015: validate RFQ Title before submission
+        const errors: Record<string, string> = {};
+        if (!form.title.trim()) {
+            errors.title = 'RFQ Title is required';
+        } else if (!RFQ_TITLE_REGEX.test(form.title)) {
+            errors.title = 'RFQ Title contains invalid characters. Allowed: letters, digits, spaces, - _ . , ( ) & / : \' "';
+        }
+        // RFQ_016: Required By must not be in the past
+        if (form.required_by && form.required_by < getTodayISO()) {
+            errors.required_by = 'Required By date cannot be in the past. Please select today or a future date';
+        }
+        // RFQ_021: Description — optional but if provided must be meaningful (10–500 chars, no HTML tags)
+        if (form.description.trim()) {
+            if (form.description.trim().length < DESC_MIN) {
+                errors.description = `Description is too short — please enter at least ${DESC_MIN} characters`;
+            } else if (form.description.length > DESC_MAX) {
+                errors.description = `Description cannot exceed ${DESC_MAX} characters (currently ${form.description.length})`;
+            }
+        }
+        // RFQ_019: at least one material item is required
+        if (form.items.length === 0) {
+            errors.items_empty = 'At least one Required Material must be added';
+        }
+        // RFQ_017 / RFQ_018 / RFQ_019: validate each item's material_name and quantity
+        form.items.forEach((item, i) => {
+            if (!item.material_name.trim()) {
+                errors[`item_${i}_material_name`] = 'Material Name is required';
+            } else if (!MATERIAL_NAME_REGEX.test(item.material_name)) {
+                errors[`item_${i}_material_name`] = 'Material Name contains invalid characters. Allowed: letters, digits, spaces, - _ . , ( ) / %';
+            }
+            // RFQ_018: quantity must be a positive number (> 0); 000000 evaluates to 0
+            const qty = Number(item.quantity);
+            if (item.quantity === '' || isNaN(qty)) {
+                errors[`item_${i}_quantity`] = 'Quantity is required';
+            } else if (qty <= 0) {
+                errors[`item_${i}_quantity`] = 'Quantity must be greater than 0 (zero or all-zeros not allowed)';
+            }
+        });
+        if (Object.keys(errors).length > 0) {
+            setFormErrors(errors);
+            return;
+        }
+        setFormErrors({});
+
         setSaving(true);
         try {
             await rfqsAPI.create(form);
             toast.success('RFQ created successfully!');
             setModalOpen(false);
             setForm({ title: '', description: '', required_by: '', notes: '', items: [{ material_name: '', quantity: '', unit: 'kg', specifications: '' }], supplier_ids: [] });
+            setFormErrors({});
             load();
         } catch (err: any) {
             toast.error(err.response?.data?.message || 'Failed to create RFQ');
@@ -59,11 +116,37 @@ export default function RFQPage() {
         } catch { toast.error('Failed to send RFQ'); }
     };
 
-    const addItem = () => setForm({ ...form, items: [...form.items, { material_name: '', quantity: '', unit: 'kg', specifications: '' }] });
+    // RFQ_019: clear items_empty error when a new item is added
+    const addItem = () => {
+        setForm({ ...form, items: [...form.items, { material_name: '', quantity: '', unit: 'kg', specifications: '' }] });
+        setFormErrors(fe => ({ ...fe, items_empty: '' }));
+    };
     const updateItem = (i: number, key: string, val: string) => {
         const items = [...form.items];
         items[i] = { ...items[i], [key]: val };
         setForm({ ...form, items });
+        // RFQ_017: clear per-item material_name error on edit
+        if (key === 'material_name') {
+            setFormErrors(fe => ({ ...fe, [`item_${i}_material_name`]: '' }));
+        }
+        // RFQ_018: clear per-item quantity error on edit
+        if (key === 'quantity') {
+            setFormErrors(fe => ({ ...fe, [`item_${i}_quantity`]: '' }));
+        }
+    };
+
+    // RFQ_022: remove an item row and clear its per-item errors; disabled when only 1 row remains (RFQ_019)
+    const removeItem = (i: number) => {
+        if (form.items.length <= 1) return;
+        const items = form.items.filter((_, idx) => idx !== i);
+        setForm({ ...form, items });
+        // clear errors for the removed row and re-index remaining rows
+        setFormErrors(fe => {
+            const next = { ...fe };
+            delete next[`item_${i}_material_name`];
+            delete next[`item_${i}_quantity`];
+            return next;
+        });
     };
 
     const toggleSupplier = (id: number) => {
@@ -151,33 +234,135 @@ export default function RFQPage() {
                         <div className="form-row form-row-2" style={{ marginBottom: 16 }}>
                             <div className="form-group">
                                 <label className="form-label required">RFQ Title</label>
-                                <input className="form-control" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} required placeholder="e.g. EN8 Steel Bars Q1 2024" />
+                                {/* RFQ_015: validated input — strips invalid chars live */}
+                                <input
+                                    className={`form-control${formErrors.title ? ' is-invalid' : ''}`}
+                                    value={form.title}
+                                    onChange={e => {
+                                        // strip characters not in the allowed set as user types
+                                        const val = e.target.value.replace(/[^A-Za-z0-9\s\-_.,()&/:'"]/g, '');
+                                        setForm({ ...form, title: val });
+                                        setFormErrors(fe => ({ ...fe, title: '' }));
+                                    }}
+                                    required
+                                    placeholder="e.g. EN8 Steel Bars Q1 2024"
+                                />
+                                {formErrors.title && (
+                                    <span style={{ color: '#ef4444', fontSize: 12, marginTop: 4, display: 'block' }}>
+                                        {formErrors.title}
+                                    </span>
+                                )}
                             </div>
                             <div className="form-group">
-                                <label className="form-label">Required By</label>
-                                <input className="form-control" type="date" value={form.required_by} onChange={e => setForm({ ...form, required_by: e.target.value })} />
+                                {/* RFQ_016: Required By is mandatory and must not be in the past */}
+                                <label className="form-label required">Required By</label>
+                                <input
+                                    className={`form-control${formErrors.required_by ? ' is-invalid' : ''}`}
+                                    type="date"
+                                    value={form.required_by}
+                                    min={getTodayISO()}
+                                    onChange={e => {
+                                        setForm({ ...form, required_by: e.target.value });
+                                        setFormErrors(fe => ({ ...fe, required_by: '' }));
+                                    }}
+                                    required
+                                />
+                                {formErrors.required_by && (
+                                    <span style={{ color: '#ef4444', fontSize: 12, marginTop: 4, display: 'block' }}>
+                                        {formErrors.required_by}
+                                    </span>
+                                )}
                             </div>
                         </div>
                         <div className="form-group" style={{ marginBottom: 20 }}>
                             <label className="form-label">Description</label>
-                            <textarea className="form-control" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} rows={2} placeholder="Brief description of requirements..." />
+                            {/* RFQ_021: optional but validated — min 10 chars if provided, max 500, no HTML */}
+                            <textarea
+                                className={`form-control${formErrors.description ? ' is-invalid' : ''}`}
+                                value={form.description}
+                                onChange={e => {
+                                    // strip < and > to prevent HTML/script injection
+                                    const val = e.target.value.replace(/[<>]/g, '');
+                                    setForm({ ...form, description: val });
+                                    setFormErrors(fe => ({ ...fe, description: '' }));
+                                }}
+                                rows={2}
+                                maxLength={DESC_MAX}
+                                placeholder="Brief description of requirements (min 10 characters)..."
+                            />
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                                {formErrors.description
+                                    ? <span style={{ color: '#ef4444', fontSize: 12 }}>{formErrors.description}</span>
+                                    : <span style={{ fontSize: 12, color: '#94a3b8' }}>Optional — min 10 chars if provided</span>
+                                }
+                                <span style={{ fontSize: 11, color: form.description.length > DESC_MAX * 0.9 ? '#f59e0b' : '#94a3b8' }}>
+                                    {form.description.length}/{DESC_MAX}
+                                </span>
+                            </div>
                         </div>
 
                         {/* Items */}
                         <div style={{ marginBottom: 20 }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                                <label className="form-label" style={{ marginBottom: 0 }}>Required Materials</label>
+                                {/* RFQ_019: Required Materials is mandatory — marked with required class */}
+                                <label className="form-label required" style={{ marginBottom: 0 }}>Required Materials</label>
                                 <button type="button" className="btn btn-secondary btn-sm" onClick={addItem}><Plus size={13} /> Add Item</button>
                             </div>
-                            {form.items.map((item, i) => (
-                                <div key={i} className="form-row form-row-3" style={{ marginBottom: 10, padding: '10px 12px', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                            {/* RFQ_019: section-level error when all item rows are deleted */}
+                            {formErrors.items_empty && (
+                                <span style={{ color: '#ef4444', fontSize: 12, marginBottom: 8, display: 'block' }}>
+                                    {formErrors.items_empty}
+                                </span>
+                            )}
+                            {form.items.map((item, i) => {
+                                // RFQ_022: row-level error — card border turns red if ANY field in this row has an error
+                                const rowHasError = !!formErrors[`item_${i}_material_name`] || !!formErrors[`item_${i}_quantity`];
+                                return (
+                                <div key={i} style={{
+                                    marginBottom: 10, padding: '10px 12px',
+                                    background: rowHasError ? '#fff5f5' : '#f8fafc',
+                                    borderRadius: 8,
+                                    border: `1.5px solid ${rowHasError ? '#ef4444' : '#e2e8f0'}`,
+                                    display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 12, alignItems: 'start'
+                                }}>
                                     <div className="form-group">
-                                        <label className="form-label" style={{ fontSize: 11 }}>Material Name</label>
-                                        <input className="form-control" value={item.material_name} onChange={e => updateItem(i, 'material_name', e.target.value)} placeholder="Material name" required />
+                                        {/* RFQ_017/RFQ_019: Material Name is mandatory */}
+                                        <label className="form-label required" style={{ fontSize: 11 }}>Material Name</label>
+                                        {/* RFQ_017: live character filtering for material name */}
+                                        <input
+                                            className={`form-control${formErrors[`item_${i}_material_name`] ? ' is-invalid' : ''}`}
+                                            value={item.material_name}
+                                            onChange={e => {
+                                                const val = e.target.value.replace(/[^A-Za-z0-9\s\-_.,()/%]/g, '');
+                                                updateItem(i, 'material_name', val);
+                                            }}
+                                            placeholder="e.g. EN8 Steel Rod"
+                                            required
+                                        />
+                                        {formErrors[`item_${i}_material_name`] && (
+                                            <span style={{ color: '#ef4444', fontSize: 11, marginTop: 3, display: 'block' }}>
+                                                {formErrors[`item_${i}_material_name`]}
+                                            </span>
+                                        )}
                                     </div>
                                     <div className="form-group">
-                                        <label className="form-label" style={{ fontSize: 11 }}>Quantity</label>
-                                        <input className="form-control" type="number" value={item.quantity} onChange={e => updateItem(i, 'quantity', e.target.value)} placeholder="0" min="0" required />
+                                        {/* RFQ_018: quantity must be > 0 */}
+                                        <label className="form-label required" style={{ fontSize: 11 }}>Quantity</label>
+                                        <input
+                                            className={`form-control${formErrors[`item_${i}_quantity`] ? ' is-invalid' : ''}`}
+                                            type="number"
+                                            value={item.quantity}
+                                            onChange={e => updateItem(i, 'quantity', e.target.value)}
+                                            placeholder="e.g. 100"
+                                            min="1"
+                                            step="any"
+                                            required
+                                        />
+                                        {formErrors[`item_${i}_quantity`] && (
+                                            <span style={{ color: '#ef4444', fontSize: 11, marginTop: 3, display: 'block' }}>
+                                                {formErrors[`item_${i}_quantity`]}
+                                            </span>
+                                        )}
                                     </div>
                                     <div className="form-group">
                                         <label className="form-label" style={{ fontSize: 11 }}>Unit</label>
@@ -185,8 +370,22 @@ export default function RFQPage() {
                                             <option>kg</option><option>mtr</option><option>pcs</option><option>ltr</option><option>ton</option>
                                         </select>
                                     </div>
+                                    {/* RFQ_022: Remove row button — disabled when only 1 row remains */}
+                                    <div style={{ paddingTop: 22 }}>
+                                        <button
+                                            type="button"
+                                            className="btn btn-danger btn-icon btn-sm"
+                                            onClick={() => removeItem(i)}
+                                            disabled={form.items.length <= 1}
+                                            title={form.items.length <= 1 ? 'At least one item is required' : 'Remove this item'}
+                                            style={{ opacity: form.items.length <= 1 ? 0.35 : 1 }}
+                                        >
+                                            <Trash2 size={13} />
+                                        </button>
+                                    </div>
                                 </div>
-                            ))}
+                                );
+                            })}
                         </div>
 
                         {/* Suppliers */}

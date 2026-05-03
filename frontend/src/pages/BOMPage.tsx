@@ -7,6 +7,12 @@ import StatusBadge from '../components/StatusBadge';
 import Pagination from '../components/Pagination';
 import toast from 'react-hot-toast';
 
+const INITIAL_FORM = {
+    product_name: '', product_code: '', version: '1.0', description: '', drawing_number: '',
+    items: [{ material_id: '', material_name: '', quantity: '', unit: 'kg', scrap_percentage: 0, is_critical: false }],
+    operations: [{ operation_name: '', operation_type: 'cnc', sequence_number: 1, estimated_time_hours: 0 }]
+};
+
 export default function BOMPage() {
     const [boms, setBoms] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
@@ -17,11 +23,11 @@ export default function BOMPage() {
     const [detailModal, setDetailModal] = useState<any>(null);
     const [materials, setMaterials] = useState<any[]>([]);
     const [saving, setSaving] = useState(false);
-    const [form, setForm] = useState({
-        product_name: '', product_code: '', version: '1.0', description: '', drawing_number: '',
-        items: [{ material_id: '', material_name: '', quantity: '', unit: 'kg', scrap_percentage: 0, is_critical: false }],
-        operations: [{ operation_name: '', operation_type: 'cnc', sequence_number: 1, estimated_time_hours: 0 }]
-    });
+    const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+    const [form, setForm] = useState(INITIAL_FORM);
+
+    // BOM_006: Product Name Validation
+    const PRODUCT_NAME_REGEX = /^[A-Za-z0-9\s\-_.,()/%]+$/;
 
     const load = async () => {
         setLoading(true);
@@ -42,11 +48,44 @@ export default function BOMPage() {
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        
+        const errors: Record<string, string> = {};
+        if (!form.product_name.trim()) {
+            errors.product_name = 'Product Name is required';
+        } else if (!PRODUCT_NAME_REGEX.test(form.product_name)) {
+            errors.product_name = 'Product name contains invalid characters. Allowed: letters, digits, spaces, - _ . , ( ) / %';
+        }
+        
+        if (!form.product_code.trim()) errors.product_code = 'Product Code is required';
+        
+        // BOM_003: Validate materials
+        if (!form.items || form.items.length === 0) {
+            errors.items_empty = 'At least one material is required';
+        }
+        form.items.forEach((item: any, i: number) => {
+            if (!item.material_id) {
+                errors[`item_${i}_material`] = 'Please select a material';
+            }
+            const qty = Number(item.quantity);
+            if (item.quantity === '' || item.quantity === null || item.quantity === undefined) {
+                errors[`item_${i}_qty`] = 'Quantity is required';
+            } else if (isNaN(qty) || qty < 0.01) {
+                errors[`item_${i}_qty`] = 'Quantity must be >= 0.01';
+            }
+        });
+
+        if (Object.keys(errors).length > 0) {
+            setFormErrors(errors);
+            return;
+        }
+        setFormErrors({});
+
         setSaving(true);
         try {
             await bomsAPI.create(form);
             toast.success('BOM created!');
             setModalOpen(false);
+            setForm(INITIAL_FORM);
             load();
         } catch (err: any) {
             toast.error(err.response?.data?.message || 'Failed to create BOM');
@@ -64,17 +103,32 @@ export default function BOMPage() {
             if (mat) items[i].material_name = mat.name;
         }
         setForm({ ...form, items });
+        // BOM_003: clear individual errors
+        if (k === 'material_id') setFormErrors(fe => ({ ...fe, [`item_${i}_material`]: '' }));
+        if (k === 'quantity') setFormErrors(fe => ({ ...fe, [`item_${i}_qty`]: '' }));
     };
     const updateOp = (i: number, k: string, v: any) => {
         const operations = [...form.operations]; operations[i] = { ...operations[i], [k]: v }; setForm({ ...form, operations });
     };
 
     const handleActivate = async (bom: any) => {
+        // BOM_005: Prevent activation without materials or operations
+        if (Number(bom.item_count) === 0 || Number(bom.operation_count) === 0) {
+            toast.error('Cannot activate: BOM must have at least 1 material and 1 operation.');
+            return;
+        }
+        
         try {
             await bomsAPI.update(bom.id, { ...bom, status: 'active' });
             toast.success('BOM activated!');
             load();
-        } catch { toast.error('Failed to activate'); }
+        } catch (err: any) { toast.error(err.response?.data?.message || 'Failed to activate'); }
+    };
+
+    const handleCloseModal = () => {
+        setModalOpen(false);
+        setForm(INITIAL_FORM);
+        setFormErrors({});
     };
 
     return (
@@ -109,8 +163,16 @@ export default function BOMPage() {
                                     {boms.map(b => (
                                         <tr key={b.id}>
                                             <td><span style={{ fontWeight: 700, color: '#2563eb' }}>{b.bom_number}</span></td>
-                                            <td style={{ fontWeight: 600 }}>{b.product_name}</td>
-                                            <td style={{ color: '#475569' }}>{b.product_code}</td>
+                                            <td style={{ fontWeight: 600, maxWidth: 200 }}>
+                                                <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={b.product_name}>
+                                                    {b.product_name}
+                                                </div>
+                                            </td>
+                                            <td style={{ color: '#475569', maxWidth: 150 }}>
+                                                <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={b.product_code}>
+                                                    {b.product_code}
+                                                </div>
+                                            </td>
                                             <td style={{ color: '#64748b' }}>v{b.version}</td>
                                             <td><span className="badge badge-info">{b.item_count} items</span></td>
                                             <td><span className="badge badge-secondary">{b.operation_count} ops</span></td>
@@ -144,10 +206,10 @@ export default function BOMPage() {
                 </div>
 
                 {/* Create BOM Modal */}
-                <Modal isOpen={modalOpen} onClose={() => setModalOpen(false)} title="Create Bill of Materials" size="xl"
+                <Modal isOpen={modalOpen} onClose={handleCloseModal} title="Create Bill of Materials" size="xl"
                     footer={
                         <>
-                            <button className="btn btn-secondary" onClick={() => setModalOpen(false)}>Cancel</button>
+                            <button className="btn btn-secondary" onClick={handleCloseModal}>Cancel</button>
                             <button className="btn btn-primary" onClick={handleSubmit} disabled={saving}>
                                 {saving && <span className="loading-spinner" style={{ width: 14, height: 14 }} />} Create BOM
                             </button>
@@ -157,11 +219,33 @@ export default function BOMPage() {
                     <div className="form-row form-row-3" style={{ marginBottom: 16 }}>
                         <div className="form-group">
                             <label className="form-label required">Product Name</label>
-                            <input className="form-control" value={form.product_name} onChange={e => setForm({ ...form, product_name: e.target.value })} required placeholder="Product name" />
+                            <input 
+                                className={`form-control${formErrors.product_name ? ' is-invalid' : ''}`} 
+                                value={form.product_name} 
+                                onChange={e => {
+                                    // BOM_006: Strip invalid characters as user types
+                                    const val = e.target.value.replace(/[^A-Za-z0-9\s\-_.,()/%]/g, '');
+                                    setForm({ ...form, product_name: val });
+                                    if (formErrors.product_name) setFormErrors({ ...formErrors, product_name: '' });
+                                }} 
+                                required 
+                                placeholder="Product name" 
+                            />
+                            {formErrors.product_name && <span style={{ color: '#ef4444', fontSize: 12, marginTop: 4, display: 'block' }}>{formErrors.product_name}</span>}
                         </div>
                         <div className="form-group">
                             <label className="form-label required">Product Code</label>
-                            <input className="form-control" value={form.product_code} onChange={e => setForm({ ...form, product_code: e.target.value })} required placeholder="PROD-001" />
+                            <input 
+                                className={`form-control${formErrors.product_code ? ' is-invalid' : ''}`} 
+                                value={form.product_code} 
+                                onChange={e => {
+                                    setForm({ ...form, product_code: e.target.value });
+                                    if (formErrors.product_code) setFormErrors({ ...formErrors, product_code: '' });
+                                }} 
+                                required 
+                                placeholder="PROD-001" 
+                            />
+                            {formErrors.product_code && <span style={{ color: '#ef4444', fontSize: 12, marginTop: 4, display: 'block' }}>{formErrors.product_code}</span>}
                         </div>
                         <div className="form-group">
                             <label className="form-label">Drawing Number</label>
@@ -174,18 +258,23 @@ export default function BOMPage() {
                             <strong style={{ fontSize: 13 }}>📦 Raw Materials Required</strong>
                             <button type="button" className="btn btn-secondary btn-sm" onClick={addItem}><Plus size={13} /> Add</button>
                         </div>
-                        {form.items.map((item, i) => (
-                            <div key={i} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 80px 1fr', gap: 8, marginBottom: 8, padding: '10px', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                        {formErrors.items_empty && <span style={{ color: '#ef4444', fontSize: 12, marginBottom: 8, display: 'block' }}>{formErrors.items_empty}</span>}
+                        {form.items.map((item, i) => {
+                            const rowHasError = !!formErrors[`item_${i}_material`] || !!formErrors[`item_${i}_qty`];
+                            return (
+                            <div key={i} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 80px 1fr', gap: 8, marginBottom: 8, padding: '10px', background: rowHasError ? '#fff5f5' : '#f8fafc', borderRadius: 8, border: `1px solid ${rowHasError ? '#ef4444' : '#e2e8f0'}` }}>
                                 <div className="form-group">
-                                    <label className="form-label" style={{ fontSize: 10 }}>Material</label>
-                                    <select className="form-control" value={item.material_id} onChange={e => updateItem(i, 'material_id', e.target.value)}>
+                                    <label className="form-label required" style={{ fontSize: 10 }}>Material</label>
+                                    <select className={`form-control${formErrors[`item_${i}_material`] ? ' is-invalid' : ''}`} value={item.material_id} onChange={e => updateItem(i, 'material_id', e.target.value)}>
                                         <option value="">Select material...</option>
                                         {materials.map(m => <option key={m.id} value={m.id}>{m.name} ({m.code})</option>)}
                                     </select>
+                                    {formErrors[`item_${i}_material`] && <span style={{ color: '#ef4444', fontSize: 10, marginTop: 2, display: 'block' }}>{formErrors[`item_${i}_material`]}</span>}
                                 </div>
                                 <div className="form-group">
-                                    <label className="form-label" style={{ fontSize: 10 }}>Quantity</label>
-                                    <input className="form-control" type="number" value={item.quantity} onChange={e => updateItem(i, 'quantity', e.target.value)} min={0} step="0.001" />
+                                    <label className="form-label required" style={{ fontSize: 10 }}>Quantity</label>
+                                    <input className={`form-control${formErrors[`item_${i}_qty`] ? ' is-invalid' : ''}`} type="number" value={item.quantity} onChange={e => updateItem(i, 'quantity', e.target.value)} min={0.01} step="0.01" />
+                                    {formErrors[`item_${i}_qty`] && <span style={{ color: '#ef4444', fontSize: 10, marginTop: 2, display: 'block' }}>{formErrors[`item_${i}_qty`]}</span>}
                                 </div>
                                 <div className="form-group">
                                     <label className="form-label" style={{ fontSize: 10 }}>Unit</label>
@@ -198,7 +287,8 @@ export default function BOMPage() {
                                     <input className="form-control" type="number" value={item.scrap_percentage} onChange={e => updateItem(i, 'scrap_percentage', parseFloat(e.target.value))} min={0} max={100} />
                                 </div>
                             </div>
-                        ))}
+                            );
+                        })}
                     </div>
 
                     <div>

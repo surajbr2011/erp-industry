@@ -5,6 +5,11 @@ const { auth, authorize } = require('../middleware/auth');
 
 const router = express.Router();
 
+// RFQ_015: RFQ Title — letters, digits, spaces and common business punctuation
+const RFQ_TITLE_REGEX = /^[A-Za-z0-9\s\-_.,()&/:'"]+$/;
+// RFQ_017: Material Name — letters, digits, spaces and basic material-description punctuation
+const MATERIAL_NAME_REGEX = /^[A-Za-z0-9\s\-_.,()/%]+$/;
+
 const generateRFQNumber = () => `RFQ-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
 const generateQuotationNumber = () => `QUO-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
 
@@ -65,7 +70,46 @@ router.get('/:id', auth, async (req, res) => {
 });
 
 // POST /api/rfqs
-router.post('/', auth, authorize('admin', 'purchase_manager'), async (req, res) => {
+router.post('/', auth, authorize('admin', 'purchase_manager'), [
+    // RFQ_015: Title must be non-empty and contain only valid characters
+    body('title').notEmpty().withMessage('RFQ Title is required')
+        .matches(RFQ_TITLE_REGEX)
+        .withMessage("RFQ Title contains invalid characters. Allowed: letters, digits, spaces, - _ . , ( ) & / : ' \""),
+    // RFQ_021: Description is optional but if provided must be 10–500 chars and contain no HTML tags
+    body('description').optional({ checkFalsy: true })
+        .trim()
+        .isLength({ min: 10 }).withMessage('Description is too short — please enter at least 10 characters')
+        .isLength({ max: 500 }).withMessage('Description cannot exceed 500 characters')
+        .custom(value => {
+            if (/<[^>]*>/.test(value)) throw new Error('Description must not contain HTML tags');
+            return true;
+        }),
+    // RFQ_016: Required By must not be in the past
+    body('required_by').notEmpty().withMessage('Required By date is required')
+        .isDate().withMessage('Required By must be a valid date (YYYY-MM-DD)')
+        .custom(value => {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const selected = new Date(value);
+            selected.setHours(0, 0, 0, 0);
+            if (selected < today) throw new Error('Required By date cannot be in the past. Please select today or a future date');
+            return true;
+        }),
+    // RFQ_019: at least one item is required (wildcards skip silently on empty arrays)
+    body('items').isArray({ min: 1 }).withMessage('At least one Required Material must be added'),
+    // RFQ_017: each item's material_name must be non-empty and contain only valid characters
+    body('items.*.material_name').notEmpty().withMessage('Material Name is required for all items')
+        .matches(MATERIAL_NAME_REGEX)
+        .withMessage('Material Name contains invalid characters. Allowed: letters, digits, spaces, - _ . , ( ) / %'),
+    // RFQ_018: quantity must be a positive number > 0 (rejects 0, 000000, negatives)
+    body('items.*.quantity').notEmpty().withMessage('Quantity is required for all items')
+        .isFloat({ gt: 0 })
+        .withMessage('Quantity must be greater than 0 (zero or all-zeros not allowed)')
+], async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+        return res.status(400).json({ success: false, message: errors.array()[0].msg, errors: errors.array() });
+    }
     try {
         const { title, description, required_by, notes, items, supplier_ids } = req.body;
         const rfqNumber = generateRFQNumber();

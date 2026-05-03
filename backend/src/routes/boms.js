@@ -1,9 +1,11 @@
 const express = require('express');
+const { body, validationResult } = require('express-validator');
 const db = require('../config/database');
 const { auth, authorize } = require('../middleware/auth');
 
 const router = express.Router();
 
+const PRODUCT_NAME_REGEX = /^[A-Za-z0-9\s\-_.,()/%]+$/;
 const generateBOMNumber = () => `BOM-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
 
 // GET /api/boms
@@ -66,7 +68,21 @@ router.get('/:id', auth, async (req, res) => {
 });
 
 // POST /api/boms
-router.post('/', auth, authorize('admin', 'production_manager'), async (req, res) => {
+router.post('/', auth, authorize('admin', 'production_manager'), [
+    // BOM_006: Validate product_name characters
+    body('product_name')
+        .trim().notEmpty().withMessage('Product name is required')
+        .matches(PRODUCT_NAME_REGEX).withMessage('Product name contains invalid characters. Allowed: letters, digits, spaces, - _ . , ( ) / %'),
+    body('product_code').trim().notEmpty().withMessage('Product code is required'),
+    // BOM_003: Item validation
+    body('items').isArray({ min: 1 }).withMessage('At least one material is required'),
+    body('items.*.material_id').notEmpty().withMessage('Material selection is required for all items'),
+    body('items.*.quantity').isFloat({ min: 0.01 }).withMessage('Quantity must be at least 0.01 for all items')
+], async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+        return res.status(400).json({ success: false, message: errors.array()[0].msg, errors: errors.array() });
+    }
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
@@ -121,6 +137,17 @@ router.put('/:id', auth, authorize('admin', 'production_manager'), async (req, r
         const params = [product_name, version, description, drawing_number, status, notes];
 
         if (status === 'active') {
+            // BOM_005: Prevent activation if no items or operations exist
+            const counts = await db.query(
+                `SELECT 
+                    (SELECT COUNT(*) FROM bom_items WHERE bom_id = $1) as item_count,
+                    (SELECT COUNT(*) FROM bom_operations WHERE bom_id = $1) as op_count`,
+                [req.params.id]
+            );
+            if (parseInt(counts.rows[0].item_count) === 0 || parseInt(counts.rows[0].op_count) === 0) {
+                return res.status(400).json({ success: false, message: 'Cannot activate: BOM must have at least 1 material and 1 operation.' });
+            }
+
             queryStr += `, approved_by=$7, approved_at=NOW() WHERE id=$8 RETURNING *`;
             params.push(req.user.id, req.params.id);
         } else {

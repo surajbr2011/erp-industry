@@ -1,8 +1,12 @@
 const express = require('express');
+const { body, validationResult } = require('express-validator');
 const db = require('../config/database');
 const { auth, authorize } = require('../middleware/auth');
 
 const router = express.Router();
+
+// PO_023: Material name — letters, digits, spaces and standard punctuation only
+const PO_MATERIAL_REGEX = /^[A-Za-z0-9\s\-_.,()/%]+$/;
 
 const generatePONumber = () => `PO-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
 
@@ -60,7 +64,40 @@ router.get('/:id', auth, async (req, res) => {
 });
 
 // POST /api/purchase-orders
-router.post('/', auth, authorize('admin', 'purchase_manager'), async (req, res) => {
+router.post('/', auth, authorize('admin', 'purchase_manager'), [
+    // Supplier must be selected
+    body('supplier_id').notEmpty().withMessage('Supplier is required'),
+    // PO_027: Payment Terms is required
+    body('payment_terms').notEmpty().withMessage('Payment Terms is required'),
+    // At least one item
+    body('items').isArray({ min: 1 }).withMessage('At least one PO item is required'),
+    // PO_023: each item material_name must be valid
+    body('items.*.material_name')
+        .notEmpty().withMessage('Material name is required for all items')
+        .matches(PO_MATERIAL_REGEX)
+        .withMessage('Material name contains invalid characters. Allowed: letters, digits, spaces, - _ . , ( ) / %'),
+    // quantity > 0
+    body('items.*.quantity')
+        .notEmpty().withMessage('Quantity is required for all items')
+        .isFloat({ gt: 0 }).withMessage('Quantity must be greater than 0'),
+    // unit_price >= 0
+    body('items.*.unit_price')
+        .notEmpty().withMessage('Rate is required for all items')
+        .isFloat({ min: 0 }).withMessage('Rate must be a positive number'),
+    // PO_026: shipping address validation
+    body('shipping_address').optional({ checkFalsy: true })
+        .trim()
+        .isLength({ min: 10 }).withMessage('Shipping address is too short — please enter at least 10 characters')
+        .isLength({ max: 250 }).withMessage('Shipping address cannot exceed 250 characters')
+        .custom(value => {
+            if (/<[^>]*>/.test(value)) throw new Error('Shipping address must not contain HTML tags');
+            return true;
+        })
+], async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+        return res.status(400).json({ success: false, message: errors.array()[0].msg, errors: errors.array() });
+    }
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
